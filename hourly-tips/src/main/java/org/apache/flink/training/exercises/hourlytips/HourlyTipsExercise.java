@@ -19,15 +19,31 @@
 package org.apache.flink.training.exercises.hourlytips;
 
 import org.apache.flink.api.common.JobExecutionResult;
+import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.functions.AggregateFunction;
+import org.apache.flink.api.common.functions.MapFunction;
+import org.apache.flink.api.common.functions.ReduceFunction;
+import org.apache.flink.api.common.typeinfo.Types;
+import org.apache.flink.api.java.aggregation.AggregationFunction;
+import org.apache.flink.api.java.aggregation.MaxAggregationFunction;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.api.java.tuple.Tuple3;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.sink.PrintSinkFunction;
 import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
+import org.apache.flink.streaming.api.functions.windowing.ProcessWindowFunction;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingEventTimeWindows;
+import org.apache.flink.streaming.api.windowing.assigners.TumblingProcessingTimeWindows;
+import org.apache.flink.streaming.api.windowing.time.Time;
+import org.apache.flink.streaming.api.windowing.windows.TimeWindow;
 import org.apache.flink.training.exercises.common.datatypes.TaxiFare;
 import org.apache.flink.training.exercises.common.sources.TaxiFareGenerator;
 import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
+import org.apache.flink.util.Collector;
+
+import java.time.Duration;
 
 /**
  * The Hourly Tips exercise from the Flink training.
@@ -75,10 +91,33 @@ public class HourlyTipsExercise {
         // start the data generator
         DataStream<TaxiFare> fares = env.addSource(source);
 
-        // replace this with your solution
-        if (true) {
-            throw new MissingSolutionException();
-        }
+        WatermarkStrategy<TaxiFare> strategy = WatermarkStrategy
+                .<TaxiFare>forBoundedOutOfOrderness(Duration.ofSeconds(20))
+                .withTimestampAssigner((event, timestamp) -> event.getEventTimeMillis());
+
+        DataStream<TaxiFare> faresWithWatermark = fares.assignTimestampsAndWatermarks(strategy);
+
+
+
+        faresWithWatermark.keyBy(fare -> fare.driverId)
+                .window(TumblingEventTimeWindows.of(Time.hours(1)))
+                .process(new MyProcessWindowFunction())
+                .windowAll(TumblingEventTimeWindows.of(Time.hours(1)))
+                .reduce(new ReduceFunction<Tuple3<Long, Long, Float>>() {
+                    public Tuple3<Long, Long, Float> reduce(Tuple3<Long, Long, Float> v1, Tuple3<Long, Long, Float> v2) {
+                        if(v1.f2 > v2.f2){
+                            return v1;
+                        }
+                        return v2;
+                    }
+                })
+                .addSink(sink)
+        ;
+
+
+
+
+
 
         // the results should be sent to the sink that was passed in
         // (otherwise the tests won't work)
@@ -90,4 +129,46 @@ public class HourlyTipsExercise {
         // execute the pipeline and return the result
         return env.execute("Hourly Tips");
     }
+//
+//    public static class TipAggregate
+//            implements AggregateFunction<TaxiFare,Tuple3<Long, Long,Float>,Tuple3<Long, Long,Float>> {
+//        @Override
+//        public Tuple3<Long, Long,Float> createAccumulator() {
+//            return new Tuple3<>(0L,0L,0f);
+//        }
+//
+//        @Override
+//        public Tuple3<Long, Long,Float> add(TaxiFare value, Tuple3<Long, Long,Float> accumulator) {
+//            return new Tuple3<>(Math.max(value.getEventTimeMillis(),accumulator.f0),value.driverId,value.tip + accumulator.f2);
+//        }
+//
+//        @Override
+//        public Tuple3<Long, Long,Float> getResult(Tuple3<Long, Long,Float> accumulator) {
+//            return accumulator;
+//        }
+//
+//        @Override
+//        public Tuple3<Long, Long,Float> merge(Tuple3<Long, Long,Float> a, Tuple3<Long, Long,Float> b) {
+//            return new Tuple3<>(Math.max(a.f0,b.f0),a.f1,a.f2 + b.f2);
+//        }
+//
+//    }
+
+    public class MyProcessWindowFunction
+            extends ProcessWindowFunction<TaxiFare, Tuple3<Long, Long,Float>, Long, TimeWindow> {
+
+        @Override
+        public void process(Long driverId,
+                            ProcessWindowFunction<TaxiFare, Tuple3<Long, Long, Float>, Long, TimeWindow>.Context context,
+                            Iterable<TaxiFare> iterable,
+                            Collector<Tuple3<Long, Long, Float>> collector) throws Exception {
+            float tips = 0f;
+            for(TaxiFare fare: iterable){
+                tips += fare.tip;
+            }
+            collector.collect(new Tuple3<>(context.window().getEnd(),driverId,tips));
+
+        }
+    }
+
 }
