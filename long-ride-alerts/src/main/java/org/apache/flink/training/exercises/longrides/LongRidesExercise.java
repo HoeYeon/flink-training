@@ -21,7 +21,13 @@ package org.apache.flink.training.exercises.longrides;
 import org.apache.flink.annotation.VisibleForTesting;
 import org.apache.flink.api.common.JobExecutionResult;
 import org.apache.flink.api.common.eventtime.WatermarkStrategy;
+import org.apache.flink.api.common.state.MapState;
+import org.apache.flink.api.common.state.MapStateDescriptor;
+import org.apache.flink.api.common.typeinfo.TypeHint;
+import org.apache.flink.api.common.typeinfo.TypeInformation;
+import org.apache.flink.api.java.tuple.Tuple2;
 import org.apache.flink.configuration.Configuration;
+import org.apache.flink.streaming.api.TimerService;
 import org.apache.flink.streaming.api.datastream.DataStream;
 import org.apache.flink.streaming.api.environment.StreamExecutionEnvironment;
 import org.apache.flink.streaming.api.functions.KeyedProcessFunction;
@@ -30,7 +36,6 @@ import org.apache.flink.streaming.api.functions.sink.SinkFunction;
 import org.apache.flink.streaming.api.functions.source.SourceFunction;
 import org.apache.flink.training.exercises.common.datatypes.TaxiRide;
 import org.apache.flink.training.exercises.common.sources.TaxiRideGenerator;
-import org.apache.flink.training.exercises.common.utils.MissingSolutionException;
 import org.apache.flink.util.Collector;
 
 import java.time.Duration;
@@ -98,17 +103,53 @@ public class LongRidesExercise {
     @VisibleForTesting
     public static class AlertFunction extends KeyedProcessFunction<Long, TaxiRide, Long> {
 
+
+        final static long DURATION = 7200000;
+        MapState<Long, Tuple2<Long,Boolean>> rideId2;
+
         @Override
-        public void open(Configuration config) throws Exception {
-            throw new MissingSolutionException();
+        public void open(Configuration config) {
+            rideId2 = getRuntimeContext().getMapState(new MapStateDescriptor<>("rideId2", TypeInformation.of(Long.class), TypeInformation.of(new TypeHint<Tuple2<Long,Boolean>>() {})));
         }
 
         @Override
         public void processElement(TaxiRide ride, Context context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+
+            long eventTime = ride.getEventTimeMillis();
+            TimerService timerService = context.timerService();
+            long endTime = (eventTime - (eventTime % DURATION) + DURATION);
+            System.out.println("process: " + eventTime + " ride: " + ride.rideId + " endTime: " + endTime + " waterMark: " + timerService.currentWatermark());
+            if(eventTime <= timerService.currentWatermark()){
+                // doNothing
+                System.out.println("Late event");
+            }else{
+                if(rideId2.contains(ride.rideId)) {
+                    if (Math.abs(eventTime - rideId2.get(ride.rideId).f0) >= DURATION) {
+                        out.collect(ride.rideId);
+                    }
+                    rideId2.remove(ride.rideId);
+                    timerService.deleteEventTimeTimer(endTime);
+
+                }else{
+                    timerService.registerEventTimeTimer(endTime);
+                    rideId2.put(ride.rideId,new Tuple2<>(ride.getEventTimeMillis(),ride.isStart));
+                }
+            }
+        }
 
         @Override
         public void onTimer(long timestamp, OnTimerContext context, Collector<Long> out)
-                throws Exception {}
+                throws Exception {
+            long id = context.getCurrentKey();
+
+            if(rideId2.contains(id)){
+                System.out.println(timestamp + " "+ rideId2.get(id) + " " + id);
+                System.out.println("Here" + " " + context.timestamp());
+                out.collect(id);
+            }
+            rideId2.remove(id);
+
+        }
     }
 }
